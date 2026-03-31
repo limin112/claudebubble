@@ -43,6 +43,7 @@ from AppKit import (
     NSMutableAttributedString, NSAttributedString,
     NSFontAttributeName, NSForegroundColorAttributeName,
     NSCursor, NSParagraphStyleAttributeName, NSMutableParagraphStyle,
+    NSMenu, NSMenuItem,
 )
 from Foundation import NSObject, NSMutableDictionary
 import signal
@@ -74,6 +75,28 @@ def _to_local_time(ts_str):
         if ts_str and len(ts_str) > 19:
             return ts_str[11:19]
         return ts_str or ""
+
+
+# --- Position persistence ---
+
+POSITION_FILE = os.path.expanduser("~/.claude/bubble-position.json")
+
+def _load_position():
+    """Load saved bubble position. Returns (x, y) or None."""
+    try:
+        with open(POSITION_FILE, "r") as f:
+            data = json.load(f)
+        return (float(data["x"]), float(data["y"]))
+    except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+def _save_position(x, y):
+    """Save bubble position to disk."""
+    try:
+        with open(POSITION_FILE, "w") as f:
+            json.dump({"x": x, "y": y}, f)
+    except OSError:
+        pass
 
 
 # --- Session detection & status checking ---
@@ -248,11 +271,36 @@ class BubbleView(NSView):
         window.setFrameOrigin_((origin.x + dx, origin.y + dy))
 
     def mouseUp_(self, event):
-        if not self._did_drag and self._delegate_ref:
+        if self._did_drag:
+            # Save position after drag
+            window = self.window()
+            if window:
+                origin = window.frame().origin
+                _save_position(origin.x, origin.y)
+        elif self._delegate_ref:
             self._delegate_ref.showDetailPanel()
         self._drag_start = None
         self._mouse_down_screen = None
         self._did_drag = False
+
+    def rightMouseDown_(self, event):
+        if not self._delegate_ref:
+            return
+        menu = NSMenu.alloc().init()
+
+        detail_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Details", "menuShowDetail:", "")
+        detail_item.setTarget_(self._delegate_ref)
+        menu.addItem_(detail_item)
+
+        menu.addItem_(NSMenuItem.separatorItem())
+
+        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Quit", "menuQuit:", "")
+        quit_item.setTarget_(self._delegate_ref)
+        menu.addItem_(quit_item)
+
+        NSMenu.popUpContextMenu_withEvent_forView_(menu, event, self)
 
     def acceptsFirstMouse_(self, event):
         return True
@@ -847,8 +895,21 @@ class BubbleDelegate(NSObject):
 
     def applicationDidFinishLaunching_(self, notification):
         screen = NSScreen.mainScreen().visibleFrame()
-        self._final_x = screen.origin.x + screen.size.width - BUBBLE_SIZE - 20
-        self._final_y = screen.origin.y + screen.size.height - BUBBLE_SIZE - 20
+        default_x = screen.origin.x + screen.size.width - BUBBLE_SIZE - 20
+        default_y = screen.origin.y + screen.size.height - BUBBLE_SIZE - 20
+
+        # Restore saved position or use default
+        saved = _load_position()
+        if saved:
+            self._final_x, self._final_y = saved[0], saved[1]
+            # Clamp to visible screen
+            if (self._final_x < screen.origin.x or
+                self._final_x > screen.origin.x + screen.size.width - BUBBLE_SIZE or
+                self._final_y < screen.origin.y or
+                self._final_y > screen.origin.y + screen.size.height - BUBBLE_SIZE):
+                self._final_x, self._final_y = default_x, default_y
+        else:
+            self._final_x, self._final_y = default_x, default_y
 
         # Start splash animation first
         self._splash = SplashController.alloc().init()
@@ -909,6 +970,14 @@ class BubbleDelegate(NSObject):
             bubble_frame = self._window.frame()
             self._detail_panel.showSessions_anchorFrame_(
                 self._active_sessions, bubble_frame)
+
+    @objc.typedSelector(b"v@:@")
+    def menuShowDetail_(self, sender):
+        self.showDetailPanel()
+
+    @objc.typedSelector(b"v@:@")
+    def menuQuit_(self, sender):
+        NSApplication.sharedApplication().terminate_(None)
 
 
 def main():

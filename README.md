@@ -25,6 +25,12 @@ A small floating circle sits on your desktop and changes color based on network 
 
 On launch, a large pulsing bubble appears at the center of the screen with an overlay explaining the color rules and usage. After a few seconds it shrinks and flies to the top-right corner.
 
+### Screenshots
+
+| Startup splash | Detail panel (click to open) |
+|:-:|:-:|
+| ![Startup splash](example-loading.png) | ![Detail panel](example.png) |
+
 ### Multi-session support
 
 Automatically monitors **all active Claude Code sessions** (modified within the last 10 minutes). If you have multiple Claude Code windows open, the bubble tracks them all.
@@ -169,6 +175,12 @@ macOS 桌面悬浮气泡，实时监控 Claude Code 会话的网络状态。
 - 操作提示（单击查看详情）
 
 停留数秒后，气泡缩小并飞向屏幕右上角。
+
+### 截图
+
+| 启动动画 | 详情面板（单击打开） |
+|:-:|:-:|
+| ![启动动画](example-loading.png) | ![详情面板](example.png) |
 
 ### 多会话支持
 
