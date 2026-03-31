@@ -13,10 +13,10 @@ Colors:
 Interactions:
   Drag       = move the bubble anywhere
   Hover      = tooltip with session summary
-  Double-click = detailed network event log
+  Click      = detailed network event log
 
 How it works:
-  Reads ~/.claude/projects/*//*.jsonl session logs every 2 seconds.
+  Reads ~/.claude/projects/*/*.jsonl session logs every 2 seconds.
   Compares the last api_error timestamp vs the last successful assistant
   response timestamp to determine if a session is actively retrying.
 
@@ -29,29 +29,51 @@ import json
 import os
 import glob
 import time
+import math
 import objc
+from datetime import datetime, timezone
 from AppKit import (
     NSApplication, NSWindow, NSPanel, NSView, NSColor, NSBezierPath,
     NSWindowStyleMaskBorderless, NSWindowStyleMaskFullSizeContentView,
     NSBackingStoreBuffered,
     NSFloatingWindowLevel, NSScreen, NSTimer,
-    NSMakeRect, NSFont,
+    NSMakeRect, NSMakePoint, NSFont,
     NSTextField, NSScrollView, NSTextView,
     NSTrackingArea, NSTrackingMouseEnteredAndExited, NSTrackingActiveAlways,
     NSMutableAttributedString, NSAttributedString,
     NSFontAttributeName, NSForegroundColorAttributeName,
-    NSCursor,
+    NSCursor, NSParagraphStyleAttributeName, NSMutableParagraphStyle,
 )
 from Foundation import NSObject, NSMutableDictionary
 import signal
 
 # --- Configuration ---
 BUBBLE_SIZE = 20          # Final bubble diameter in pixels
-BUBBLE_START_SIZE = 80    # Startup animation initial size
+SPLASH_SIZE = 260         # Startup splash bubble size
 CHECK_INTERVAL = 2.0      # Seconds between status checks
-ANIM_STEPS = 12           # Entrance animation frames
-ANIM_INTERVAL = 0.03      # Seconds per animation frame
 ACTIVE_WINDOW_SECS = 600  # Sessions active within this window (10 min)
+
+# Startup animation
+SPLASH_ANIM_STEPS = 60    # Frames for splash shrink animation
+SPLASH_ANIM_INTERVAL = 0.022  # ~45fps
+SPLASH_HOLD_SECS = 3.5    # How long to show the splash before shrinking
+CLICK_THRESHOLD = 4.0     # Max px movement to count as click (not drag)
+
+
+# --- Timezone helper ---
+
+def _to_local_time(ts_str):
+    """Convert ISO timestamp to local timezone HH:MM:SS string."""
+    try:
+        cleaned = ts_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned)
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%H:%M:%S")
+    except (ValueError, AttributeError, TypeError):
+        # Fallback: just extract HH:MM:SS from the string
+        if ts_str and len(ts_str) > 19:
+            return ts_str[11:19]
+        return ts_str or ""
 
 
 # --- Session detection & status checking ---
@@ -111,7 +133,7 @@ def check_session_status(jsonl_path):
 
 
 def get_session_detail(jsonl_path):
-    """Get detailed network event log for the double-click panel."""
+    """Get detailed network event log for the click panel."""
     try:
         result = subprocess.run(
             ["tail", "-n", "100", jsonl_path],
@@ -131,17 +153,17 @@ def get_session_detail(jsonl_path):
         if not session_slug:
             session_slug = entry.get("slug", "")
         if entry.get("type") == "system" and entry.get("subtype") == "api_error":
-            ts = entry.get("timestamp", "")[11:19]
+            ts = _to_local_time(entry.get("timestamp", ""))
             retry = entry.get("retryAttempt", 0)
             max_r = entry.get("maxRetries", 10)
             code = (entry.get("cause", {}).get("code")
                     or entry.get("error", {}).get("cause", {}).get("code")
                     or "ERR")
-            events.append(("err", f"  {ts}  ERR  {code}  retry {retry}/{max_r}"))
+            events.append(("err", f"{ts}  ERR  {code}  retry {retry}/{max_r}"))
         if (entry.get("type") == "assistant"
                 and entry.get("message", {}).get("stop_reason") is not None):
-            ts = entry.get("timestamp", "")[11:19]
-            events.append(("ok", f"  {ts}  OK   response received"))
+            ts = _to_local_time(entry.get("timestamp", ""))
+            events.append(("ok", f"{ts}  OK   response received"))
 
     return session_slug, events
 
@@ -179,9 +201,10 @@ def check_all_sessions():
         return ("ok", f"{summary}\n{tooltip}", sessions)
 
 
-# --- UI ---
+# --- UI Components ---
 
 class BubbleView(NSView):
+    """The draggable bubble circle. Single-click opens detail panel."""
     _delegate_ref = None
 
     def initWithFrame_(self, frame):
@@ -190,6 +213,8 @@ class BubbleView(NSView):
             self._color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
                 0.2, 0.8, 0.3, 0.9)
             self._drag_start = None
+            self._mouse_down_screen = None
+            self._did_drag = False
         return self
 
     def setColor_(self, color):
@@ -205,11 +230,10 @@ class BubbleView(NSView):
         path.stroke()
 
     def mouseDown_(self, event):
-        if event.clickCount() == 2:
-            if self._delegate_ref:
-                self._delegate_ref.showDetailPanel()
-        else:
-            self._drag_start = event.locationInWindow()
+        self._drag_start = event.locationInWindow()
+        screen_loc = self.window().convertPointToScreen_(event.locationInWindow())
+        self._mouse_down_screen = (screen_loc.x, screen_loc.y)
+        self._did_drag = False
 
     def mouseDragged_(self, event):
         window = self.window()
@@ -219,7 +243,16 @@ class BubbleView(NSView):
         origin = window.frame().origin
         dx = screen_loc.x - self._drag_start.x
         dy = screen_loc.y - self._drag_start.y
+        if abs(dx) > CLICK_THRESHOLD or abs(dy) > CLICK_THRESHOLD:
+            self._did_drag = True
         window.setFrameOrigin_((origin.x + dx, origin.y + dy))
+
+    def mouseUp_(self, event):
+        if not self._did_drag and self._delegate_ref:
+            self._delegate_ref.showDetailPanel()
+        self._drag_start = None
+        self._mouse_down_screen = None
+        self._did_drag = False
 
     def acceptsFirstMouse_(self, event):
         return True
@@ -227,39 +260,36 @@ class BubbleView(NSView):
 
 # --- Detail Panel UI ---
 
-PANEL_WIDTH = 420
-PANEL_HEIGHT = 480
+PANEL_WIDTH = 440
+PANEL_HEIGHT = 520
 PANEL_CORNER_RADIUS = 14
 
-# Color palette for the detail panel
 _COLORS = {
     "bg":         (0.10, 0.10, 0.12, 0.94),
     "title":      (0.92, 0.92, 0.95, 1.0),
     "subtitle":   (0.55, 0.55, 0.60, 1.0),
     "separator":  (0.25, 0.25, 0.30, 0.6),
     "ok_dot":     (0.30, 0.82, 0.40, 1.0),
+    "warn_dot":   (0.95, 0.70, 0.10, 1.0),
     "err_dot":    (0.95, 0.30, 0.25, 1.0),
     "ok_text":    (0.55, 0.78, 0.55, 1.0),
     "err_text":   (0.95, 0.50, 0.45, 1.0),
     "log_text":   (0.72, 0.72, 0.76, 1.0),
     "session":    (0.85, 0.85, 0.90, 1.0),
     "close_bg":   (0.20, 0.20, 0.24, 1.0),
-    "close_hover":(0.30, 0.30, 0.35, 1.0),
+    "close_hover": (0.30, 0.30, 0.35, 1.0),
     "close_text": (0.60, 0.60, 0.65, 1.0),
-    "badge_err":  (0.95, 0.30, 0.25, 0.15),
-    "badge_ok":   (0.30, 0.82, 0.40, 0.12),
+    "rule_text":  (0.68, 0.68, 0.72, 1.0),
+    "rule_label": (0.80, 0.80, 0.84, 1.0),
     "empty":      (0.45, 0.45, 0.50, 0.7),
-    "scrollbar":  (0.35, 0.35, 0.40, 0.5),
 }
 
 def _c(name):
-    """Get an NSColor from the palette."""
     r, g, b, a = _COLORS[name]
     return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
 
 
 class CloseButton(NSView):
-    """Custom close button with hover effect."""
     _hovered = False
     _action_target = None
 
@@ -270,8 +300,7 @@ class CloseButton(NSView):
             area = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
                 self.bounds(),
                 NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
-                self, None
-            )
+                self, None)
             self.addTrackingArea_(area)
         return self
 
@@ -281,23 +310,17 @@ class CloseButton(NSView):
             self.bounds(), 6, 6)
         bg.set()
         path.fill()
-
-        # Draw "×" symbol
-        _c("close_text").set()
-        font = NSFont.fontWithName_size_("Menlo", 13)
-        if not font:
-            font = NSFont.systemFontOfSize_(13)
+        font = NSFont.fontWithName_size_("Menlo", 13) or NSFont.systemFontOfSize_(13)
         attrs = NSMutableDictionary.alloc().init()
         attrs[NSFontAttributeName] = font
         attrs[NSForegroundColorAttributeName] = (
             _c("title") if self._hovered else _c("close_text"))
-        s = NSAttributedString.alloc().initWithString_attributes_("✕", attrs)
+        s = NSAttributedString.alloc().initWithString_attributes_("\u2715", attrs)
         b = self.bounds()
         sz = s.size()
         s.drawAtPoint_((
             b.origin.x + (b.size.width - sz.width) / 2,
-            b.origin.y + (b.size.height - sz.height) / 2 - 0.5
-        ))
+            b.origin.y + (b.size.height - sz.height) / 2 - 0.5))
 
     def mouseEntered_(self, event):
         self._hovered = True
@@ -318,30 +341,26 @@ class CloseButton(NSView):
 
 
 class RoundedPanelView(NSView):
-    """Background view with rounded corners and dark fill."""
     def drawRect_(self, rect):
         path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             self.bounds(), PANEL_CORNER_RADIUS, PANEL_CORNER_RADIUS)
         _c("bg").set()
         path.fill()
-        # Subtle inner border
         NSColor.colorWithCalibratedWhite_alpha_(0.25, 0.15).set()
         path.setLineWidth_(0.5)
         path.stroke()
 
 
 def _build_detail_attributed_string(sessions):
-    """Build a rich NSMutableAttributedString from session data."""
+    """Build rich attributed string with color rules + session data."""
     result = NSMutableAttributedString.alloc().init()
 
-    mono = NSFont.fontWithName_size_("SF Mono", 11.5)
-    if not mono:
-        mono = NSFont.fontWithName_size_("Menlo", 11.5)
-    mono_sm = NSFont.fontWithName_size_("SF Mono", 10.5)
-    if not mono_sm:
-        mono_sm = NSFont.fontWithName_size_("Menlo", 10.5)
-    label_font = NSFont.fontWithName_size_("SF Pro Text", 13) or NSFont.systemFontOfSize_(13)
+    mono = NSFont.fontWithName_size_("SF Mono", 11.5) or NSFont.fontWithName_size_("Menlo", 11.5)
+    mono_sm = NSFont.fontWithName_size_("SF Mono", 10.5) or NSFont.fontWithName_size_("Menlo", 10.5)
+    label_font = NSFont.fontWithName_size_("SF Pro Text", 12.5) or NSFont.systemFontOfSize_(12.5)
     label_bold = NSFont.boldSystemFontOfSize_(13)
+    rule_font = NSFont.fontWithName_size_("SF Pro Text", 11.5) or NSFont.systemFontOfSize_(11.5)
+    section_font = NSFont.boldSystemFontOfSize_(11)
 
     def _append(text, font, color):
         attrs = NSMutableDictionary.alloc().init()
@@ -350,8 +369,34 @@ def _build_detail_attributed_string(sessions):
         seg = NSAttributedString.alloc().initWithString_attributes_(text, attrs)
         result.appendAttributedString_(seg)
 
+    # --- Color Rules Section ---
+    _append("COLOR RULES\n", section_font, _c("subtitle"))
+    _append("\n", mono_sm, _c("separator"))
+
+    # Green rule
+    _append("  \u25CF ", label_font, _c("ok_dot"))
+    _append("Green", label_bold, _c("ok_dot"))
+    _append("  \u2014  All sessions running normally\n", rule_font, _c("rule_text"))
+
+    # Yellow rule
+    _append("  \u25CF ", label_font, _c("warn_dot"))
+    _append("Yellow", label_bold, _c("warn_dot"))
+    _append("  \u2014  Some sessions retrying (partial errors)\n", rule_font, _c("rule_text"))
+
+    # Red rule
+    _append("  \u25CF ", label_font, _c("err_dot"))
+    _append("Red", label_bold, _c("err_dot"))
+    _append("  \u2014  All sessions retrying (network down)\n", rule_font, _c("rule_text"))
+
+    _append("\n", mono_sm, _c("separator"))
+    _append("\u2500" * 46 + "\n\n", mono_sm, _c("separator"))
+
+    # --- Sessions Section ---
+    _append("SESSIONS\n", section_font, _c("subtitle"))
+    _append("\n", mono_sm, _c("separator"))
+
     if not sessions:
-        _append("No active sessions found", mono, _c("empty"))
+        _append("  No active sessions found\n", mono, _c("empty"))
         return result
 
     first_session = True
@@ -365,12 +410,10 @@ def _build_detail_attributed_string(sessions):
             _append("\n", mono, _c("separator"))
         first_session = False
 
-        # Session header: colored dot + name
         dot_color = _c("err_dot") if err_count > 0 else _c("ok_dot")
-        _append("● ", label_font, dot_color)
+        _append("  \u25CF ", label_font, dot_color)
         _append(name, label_bold, _c("session"))
 
-        # Badge
         if err_count > 0:
             _append(f"  {err_count} err", mono_sm, _c("err_text"))
         else:
@@ -379,19 +422,15 @@ def _build_detail_attributed_string(sessions):
             _append(f"  {ok_count} recv", mono_sm, _c("ok_text"))
         _append("\n", mono, _c("log_text"))
 
-        # Separator line
-        _append("─" * 42 + "\n", mono_sm, _c("separator"))
+        _append("  " + "\u2500" * 40 + "\n", mono_sm, _c("separator"))
 
-        # Event log
         if events:
             for typ, text in events[-15:]:
-                color = _c("err_text") if typ == "err" else _c("ok_text")
-                prefix = "▸ " if typ == "err" else "  "
-                # Clean up the text - remove leading spaces
-                clean = text.strip()
-                _append(f"{prefix}{clean}\n", mono_sm, color if typ == "err" else _c("log_text"))
+                prefix = "  \u25B8 " if typ == "err" else "    "
+                _append(f"{prefix}{text}\n", mono_sm,
+                        _c("err_text") if typ == "err" else _c("log_text"))
         else:
-            _append("  (no recent network events)\n", mono_sm, _c("empty"))
+            _append("    (no recent network events)\n", mono_sm, _c("empty"))
 
     return result
 
@@ -408,18 +447,19 @@ class DetailPanelController(NSObject):
         return self
 
     def showSessions_anchorFrame_(self, sessions, anchor_frame):
-        """Create and show the detail panel near the bubble."""
         if self._window and self._window.isVisible():
             self._window.orderOut_(None)
             self._window = None
+            self._remove_click_outside_monitor()
+            return
 
-        # Position: above and to the left of the bubble
         screen = NSScreen.mainScreen().visibleFrame()
         px = anchor_frame.origin.x + anchor_frame.size.width / 2 - PANEL_WIDTH + 30
         py = anchor_frame.origin.y - PANEL_HEIGHT - 8
-        # Keep on screen
         if px < screen.origin.x + 10:
             px = screen.origin.x + 10
+        if px + PANEL_WIDTH > screen.origin.x + screen.size.width - 10:
+            px = screen.origin.x + screen.size.width - PANEL_WIDTH - 10
         if py < screen.origin.y + 10:
             py = anchor_frame.origin.y + anchor_frame.size.height + 8
 
@@ -428,9 +468,7 @@ class DetailPanelController(NSObject):
         win = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             frame,
             NSWindowStyleMaskBorderless | NSWindowStyleMaskFullSizeContentView,
-            NSBackingStoreBuffered,
-            False,
-        )
+            NSBackingStoreBuffered, False)
         win.setLevel_(NSFloatingWindowLevel + 1)
         win.setOpaque_(False)
         win.setBackgroundColor_(NSColor.clearColor())
@@ -438,11 +476,10 @@ class DetailPanelController(NSObject):
         win.setAlphaValue_(0.0)
         win.setMovableByWindowBackground_(True)
 
-        # Root view with rounded background
         root = RoundedPanelView.alloc().initWithFrame_(
             NSMakeRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT))
 
-        # Title bar area
+        # Title
         title_y = PANEL_HEIGHT - 42
         title_label = NSTextField.labelWithString_("Network Status")
         title_label.setFont_(
@@ -455,7 +492,7 @@ class DetailPanelController(NSObject):
         title_label.setFrame_(NSMakeRect(18, title_y, 300, 22))
         root.addSubview_(title_label)
 
-        # Session count subtitle
+        # Subtitle
         count = len(sessions)
         sub_text = f"{count} active session{'s' if count != 1 else ''}"
         sub_label = NSTextField.labelWithString_(sub_text)
@@ -475,7 +512,7 @@ class DetailPanelController(NSObject):
         close_btn._action_target = self
         root.addSubview_(close_btn)
 
-        # Divider line
+        # Divider
         divider_y = title_y - 26
         divider = NSView.alloc().initWithFrame_(
             NSMakeRect(16, divider_y, PANEL_WIDTH - 32, 1))
@@ -484,14 +521,14 @@ class DetailPanelController(NSObject):
             NSColor.colorWithCalibratedWhite_alpha_(0.25, 0.3).CGColor())
         root.addSubview_(divider)
 
-        # Scrollable text area
+        # Scroll area
         scroll_y = 12
         scroll_h = divider_y - scroll_y - 6
         scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(12, scroll_y, PANEL_WIDTH - 24, scroll_h))
         scroll.setHasVerticalScroller_(True)
         scroll.setHasHorizontalScroller_(False)
-        scroll.setBorderType_(0)  # No border
+        scroll.setBorderType_(0)
         scroll.setDrawsBackground_(False)
         scroll.setAutohidesScrollers_(True)
 
@@ -503,7 +540,6 @@ class DetailPanelController(NSObject):
         text_view.setTextContainerInset_((6, 8))
         text_view.textContainer().setWidthTracksTextView_(True)
 
-        # Build and set attributed content
         content = _build_detail_attributed_string(sessions)
         text_view.textStorage().setAttributedString_(content)
 
@@ -514,13 +550,9 @@ class DetailPanelController(NSObject):
         win.makeKeyAndOrderFront_(None)
         self._window = win
 
-        # Fade-in animation
         self._fade_step = 0
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            0.018, self, "fadeIn:", None, True
-        )
-
-        # Click-outside monitor
+            0.018, self, "fadeIn:", None, True)
         self._install_click_outside_monitor()
 
     @objc.typedSelector(b"v@:@")
@@ -532,7 +564,6 @@ class DetailPanelController(NSObject):
             if self._window:
                 self._window.setAlphaValue_(1.0)
             return
-        # Ease-out quad
         alpha = 1.0 - (1.0 - t) * (1.0 - t)
         if self._window:
             self._window.setAlphaValue_(alpha)
@@ -549,14 +580,13 @@ class DetailPanelController(NSObject):
             from AppKit import NSEventMaskLeftMouseDown
             mask = NSEventMaskLeftMouseDown
         except ImportError:
-            mask = 1 << 1  # NSLeftMouseDownMask
+            mask = 1 << 1
         def handler(event):
             if self._window and self._window.isVisible():
                 if event.window() != self._window:
                     self.closePanel()
         self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            mask, handler
-        )
+            mask, handler)
 
     def _remove_click_outside_monitor(self):
         if self._monitor:
@@ -564,6 +594,245 @@ class DetailPanelController(NSObject):
             NSEvent.removeMonitor_(self._monitor)
             self._monitor = None
 
+
+# --- Splash Screen (Startup Animation) ---
+
+class SplashBubbleView(NSView):
+    """The big animated bubble shown on startup."""
+    _pulse_phase = 0.0
+
+    def initWithFrame_(self, frame):
+        self = objc.super(SplashBubbleView, self).initWithFrame_(frame)
+        if self:
+            self._pulse_phase = 0.0
+        return self
+
+    def drawRect_(self, rect):
+        b = self.bounds()
+        # Pulsing glow
+        glow_alpha = 0.08 + 0.06 * math.sin(self._pulse_phase)
+        glow_inset = -12
+        glow_rect = NSMakeRect(
+            b.origin.x + glow_inset, b.origin.y + glow_inset,
+            b.size.width - 2 * glow_inset, b.size.height - 2 * glow_inset)
+        glow_path = NSBezierPath.bezierPathWithOvalInRect_(glow_rect)
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            0.3, 0.85, 0.4, glow_alpha).set()
+        glow_path.fill()
+
+        # Main circle
+        path = NSBezierPath.bezierPathWithOvalInRect_(b)
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            0.20, 0.80, 0.35, 0.92).set()
+        path.fill()
+        NSColor.colorWithCalibratedWhite_alpha_(0.5, 0.25).set()
+        path.setLineWidth_(1.5)
+        path.stroke()
+
+
+class SplashController(NSObject):
+    """Manages the dramatic startup splash animation."""
+
+    def init(self):
+        self = objc.super(SplashController, self).init()
+        if self:
+            self._window = None
+            self._overlay = None
+            self._bubble_view = None
+            self._labels = []
+            self._anim_step = 0
+            self._phase = "hold"  # hold -> shrink -> done
+            self._pulse_step = 0
+            self._on_complete = None
+            self._final_x = 0
+            self._final_y = 0
+        return self
+
+    def startWithFinalX_finalY_onComplete_(self, final_x, final_y, on_complete):
+        self._final_x = final_x
+        self._final_y = final_y
+        self._on_complete = on_complete
+
+        screen = NSScreen.mainScreen().frame()
+        scr_w = screen.size.width
+        scr_h = screen.size.height
+
+        # Semi-transparent dark overlay covering the whole screen
+        self._overlay = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            screen, NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False)
+        self._overlay.setLevel_(NSFloatingWindowLevel + 2)
+        self._overlay.setOpaque_(False)
+        self._overlay.setBackgroundColor_(
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 0.0, 0.0, 0.55))
+        self._overlay.setIgnoresMouseEvents_(True)
+        self._overlay.setAlphaValue_(0.0)
+
+        # Overlay content for labels
+        overlay_view = NSView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, scr_w, scr_h))
+
+        # --- Title ---
+        cx = scr_w / 2
+        cy = scr_h / 2
+        title = NSTextField.labelWithString_("Claude Code Network Monitor")
+        title.setFont_(
+            NSFont.fontWithName_size_("SF Pro Display", 26)
+            or NSFont.boldSystemFontOfSize_(26))
+        title.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.95, 1.0))
+        title.setBackgroundColor_(NSColor.clearColor())
+        title.setBezeled_(False)
+        title.setEditable_(False)
+        title.sizeToFit()
+        tw = title.frame().size.width
+        title.setFrame_(NSMakeRect(cx - tw / 2, cy + SPLASH_SIZE / 2 + 48, tw, 32))
+        overlay_view.addSubview_(title)
+        self._labels.append(title)
+
+        # --- Rule lines (below the bubble) ---
+        rules = [
+            ("\u25CF", (0.30, 0.82, 0.40), "Green", "All OK"),
+            ("\u25CF", (0.95, 0.70, 0.10), "Yellow", "Some retrying"),
+            ("\u25CF", (0.95, 0.30, 0.25), "Red", "All retrying"),
+        ]
+        rule_y_start = cy - SPLASH_SIZE / 2 - 50
+        for i, (dot, dot_rgb, label, desc) in enumerate(rules):
+            y = rule_y_start - i * 28
+            line_str = f"  {dot}  {label}  \u2014  {desc}"
+            lbl = NSTextField.labelWithString_(line_str)
+            lbl.setFont_(
+                NSFont.fontWithName_size_("SF Pro Text", 15)
+                or NSFont.systemFontOfSize_(15))
+            r, g, b = dot_rgb
+            lbl.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 1.0))
+            lbl.setBackgroundColor_(NSColor.clearColor())
+            lbl.setBezeled_(False)
+            lbl.setEditable_(False)
+            lbl.sizeToFit()
+            lw = lbl.frame().size.width
+            lbl.setFrame_(NSMakeRect(cx - lw / 2, y, lw, 22))
+            overlay_view.addSubview_(lbl)
+            self._labels.append(lbl)
+
+        # --- Hint at bottom ---
+        hint = NSTextField.labelWithString_("Click the bubble to view details")
+        hint.setFont_(
+            NSFont.fontWithName_size_("SF Pro Text", 13)
+            or NSFont.systemFontOfSize_(13))
+        hint.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.6, 1.0))
+        hint.setBackgroundColor_(NSColor.clearColor())
+        hint.setBezeled_(False)
+        hint.setEditable_(False)
+        hint.sizeToFit()
+        hw = hint.frame().size.width
+        hint.setFrame_(NSMakeRect(cx - hw / 2, rule_y_start - 3 * 28 - 10, hw, 20))
+        overlay_view.addSubview_(hint)
+        self._labels.append(hint)
+
+        self._overlay.setContentView_(overlay_view)
+        self._overlay.makeKeyAndOrderFront_(None)
+
+        # Bubble window (centered, big)
+        bx = cx - SPLASH_SIZE / 2
+        by = cy - SPLASH_SIZE / 2
+        self._window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(bx, by, SPLASH_SIZE, SPLASH_SIZE),
+            NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False)
+        self._window.setLevel_(NSFloatingWindowLevel + 3)
+        self._window.setOpaque_(False)
+        self._window.setBackgroundColor_(NSColor.clearColor())
+        self._window.setHasShadow_(True)
+        self._window.setIgnoresMouseEvents_(True)
+        self._window.setAlphaValue_(0.0)
+
+        self._bubble_view = SplashBubbleView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, SPLASH_SIZE, SPLASH_SIZE))
+        self._window.setContentView_(self._bubble_view)
+        self._window.makeKeyAndOrderFront_(None)
+
+        # Start fade-in + pulse timer
+        self._anim_step = 0
+        self._phase = "fadein"
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            SPLASH_ANIM_INTERVAL, self, "animateSplash:", None, True)
+
+    @objc.typedSelector(b"v@:@")
+    def animateSplash_(self, timer):
+        self._anim_step += 1
+        self._pulse_step += 1
+
+        if self._phase == "fadein":
+            # Fade in over 15 frames
+            t = min(1.0, self._anim_step / 15.0)
+            ease = 1.0 - (1.0 - t) * (1.0 - t)
+            if self._window:
+                self._window.setAlphaValue_(ease)
+            if self._overlay:
+                self._overlay.setAlphaValue_(ease)
+            if self._bubble_view:
+                self._bubble_view._pulse_phase = self._pulse_step * 0.15
+                self._bubble_view.setNeedsDisplay_(True)
+            if t >= 1.0:
+                self._phase = "hold"
+                self._anim_step = 0
+
+        elif self._phase == "hold":
+            # Hold for SPLASH_HOLD_SECS, keep pulsing
+            hold_frames = int(SPLASH_HOLD_SECS / SPLASH_ANIM_INTERVAL)
+            if self._bubble_view:
+                self._bubble_view._pulse_phase = self._pulse_step * 0.15
+                self._bubble_view.setNeedsDisplay_(True)
+            if self._anim_step >= hold_frames:
+                self._phase = "shrink"
+                self._anim_step = 0
+                # Store start position
+                screen = NSScreen.mainScreen().frame()
+                self._start_cx = screen.size.width / 2
+                self._start_cy = screen.size.height / 2
+
+        elif self._phase == "shrink":
+            t = min(1.0, self._anim_step / float(SPLASH_ANIM_STEPS))
+            # Ease-in-out cubic
+            if t < 0.5:
+                ease = 4 * t * t * t
+            else:
+                ease = 1 - (-2 * t + 2) ** 3 / 2
+
+            # Interpolate size
+            size = SPLASH_SIZE + (BUBBLE_SIZE - SPLASH_SIZE) * ease
+
+            # Interpolate position (center -> final corner)
+            target_cx = self._final_x + BUBBLE_SIZE / 2
+            target_cy = self._final_y + BUBBLE_SIZE / 2
+            cx = self._start_cx + (target_cx - self._start_cx) * ease
+            cy = self._start_cy + (target_cy - self._start_cy) * ease
+            x = cx - size / 2
+            y = cy - size / 2
+
+            if self._window:
+                self._window.setFrame_display_(
+                    NSMakeRect(x, y, size, size), True)
+                self._bubble_view.setFrame_(NSMakeRect(0, 0, size, size))
+                self._bubble_view._pulse_phase = self._pulse_step * 0.15
+                self._bubble_view.setNeedsDisplay_(True)
+
+            # Fade out overlay and labels
+            overlay_alpha = max(0.0, 1.0 - ease * 2.5)
+            if self._overlay:
+                self._overlay.setAlphaValue_(overlay_alpha)
+
+            if t >= 1.0:
+                timer.invalidate()
+                if self._overlay:
+                    self._overlay.orderOut_(None)
+                    self._overlay = None
+                if self._window:
+                    self._window.orderOut_(None)
+                    self._window = None
+                if self._on_complete:
+                    self._on_complete()
+
+
+# --- Main App Delegate ---
 
 class BubbleDelegate(NSObject):
     def init(self):
@@ -573,6 +842,7 @@ class BubbleDelegate(NSObject):
             self._view = None
             self._active_sessions = []
             self._detail_panel = DetailPanelController.alloc().init()
+            self._splash = None
         return self
 
     def applicationDidFinishLaunching_(self, notification):
@@ -580,64 +850,38 @@ class BubbleDelegate(NSObject):
         self._final_x = screen.origin.x + screen.size.width - BUBBLE_SIZE - 20
         self._final_y = screen.origin.y + screen.size.height - BUBBLE_SIZE - 20
 
-        start_size = BUBBLE_START_SIZE
-        x = self._final_x - (start_size - BUBBLE_SIZE) / 2
-        y = self._final_y - (start_size - BUBBLE_SIZE) / 2
+        # Start splash animation first
+        self._splash = SplashController.alloc().init()
+        self._splash.startWithFinalX_finalY_onComplete_(
+            self._final_x, self._final_y, self._onSplashComplete)
 
+        # Start status checking immediately (runs in background)
+        self._check_status()
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            CHECK_INTERVAL, self, "timerFired:", None, True)
+
+    def _onSplashComplete(self):
+        """Called when splash animation finishes. Show the real bubble."""
         self._window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(x, y, start_size, start_size),
-            NSWindowStyleMaskBorderless,
-            NSBackingStoreBuffered,
-            False,
-        )
+            NSMakeRect(self._final_x, self._final_y, BUBBLE_SIZE, BUBBLE_SIZE),
+            NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False)
         self._window.setLevel_(NSFloatingWindowLevel)
         self._window.setOpaque_(False)
         self._window.setBackgroundColor_(NSColor.clearColor())
         self._window.setHasShadow_(True)
         self._window.setIgnoresMouseEvents_(False)
         self._window.setCollectionBehavior_(1 << 0)  # canJoinAllSpaces
-        self._window.setAlphaValue_(0.0)
+        self._window.setAlphaValue_(1.0)
 
         self._view = BubbleView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, start_size, start_size))
+            NSMakeRect(0, 0, BUBBLE_SIZE, BUBBLE_SIZE))
         self._view._delegate_ref = self
         self._window.setContentView_(self._view)
         self._window.makeKeyAndOrderFront_(None)
 
-        self._anim_step = 0
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            ANIM_INTERVAL, self, "animateEntrance:", None, True
-        )
-
+        # Apply current status color
         self._check_status()
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            CHECK_INTERVAL, self, "timerFired:", None, True
-        )
-
-    def animateEntrance_(self, timer):
-        self._anim_step += 1
-        t = self._anim_step / ANIM_STEPS
-
-        if t >= 1.0:
-            timer.invalidate()
-            self._window.setFrame_display_(
-                NSMakeRect(self._final_x, self._final_y,
-                           BUBBLE_SIZE, BUBBLE_SIZE), True)
-            self._view.setFrame_(NSMakeRect(0, 0, BUBBLE_SIZE, BUBBLE_SIZE))
-            self._window.setAlphaValue_(1.0)
-            self._view.setNeedsDisplay_(True)
-            return
-
-        ease = 1 - (1 - t) * (1 - t)
-        size = BUBBLE_START_SIZE + (BUBBLE_SIZE - BUBBLE_START_SIZE) * ease
-        alpha = min(1.0, t * 2.5)
-        x = self._final_x - (size - BUBBLE_SIZE) / 2
-        y = self._final_y - (size - BUBBLE_SIZE) / 2
-
-        self._window.setFrame_display_(NSMakeRect(x, y, size, size), False)
-        self._view.setFrame_(NSMakeRect(0, 0, size, size))
-        self._window.setAlphaValue_(alpha)
-        self._view.setNeedsDisplay_(True)
+        self._splash = None
 
     def timerFired_(self, timer):
         self._check_status()
@@ -656,12 +900,15 @@ class BubbleDelegate(NSObject):
             color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
                 0.2, 0.8, 0.3, 0.9)
 
-        self._view.setColor_(color)
-        self._view.setToolTip_(info)
+        if self._view:
+            self._view.setColor_(color)
+            self._view.setToolTip_(info)
 
     def showDetailPanel(self):
-        bubble_frame = self._window.frame()
-        self._detail_panel.showSessions_anchorFrame_(self._active_sessions, bubble_frame)
+        if self._window:
+            bubble_frame = self._window.frame()
+            self._detail_panel.showSessions_anchorFrame_(
+                self._active_sessions, bubble_frame)
 
 
 def main():
