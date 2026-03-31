@@ -1,3 +1,5 @@
+[中文说明](#claude-code-network-bubble-中文说明) | [English](#claude-code-network-bubble)
+
 # Claude Code Network Bubble
 
 A floating desktop bubble for macOS that monitors your Claude Code sessions' network health in real time.
@@ -64,7 +66,7 @@ pip3 install pyobjc-framework-Cocoa
 
 # Download the script
 curl -o ~/.claude/claude-net-bubble.py \
-  https://raw.githubusercontent.com/anthropics/claude-code-community/main/claude-net-bubble.py
+  https://raw.githubusercontent.com/limin112/claudebubble/main/claude-net-bubble.py
 ```
 
 ### Run manually
@@ -147,6 +149,8 @@ MIT
 
 ---
 
+[English](#claude-code-network-bubble) | [中文说明](#claude-code-network-bubble-中文说明)
+
 # Claude Code Network Bubble (中文说明)
 
 macOS 桌面悬浮气泡，实时监控 Claude Code 会话的网络状态。
@@ -215,7 +219,7 @@ pip3 install pyobjc-framework-Cocoa
 
 # 下载脚本
 curl -o ~/.claude/claude-net-bubble.py \
-  https://raw.githubusercontent.com/anthropics/claude-code-community/main/claude-net-bubble.py
+  https://raw.githubusercontent.com/limin112/claudebubble/main/claude-net-bubble.py
 ```
 
 ### 手动运行
