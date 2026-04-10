@@ -49,7 +49,7 @@ from Foundation import NSObject, NSMutableDictionary
 import signal
 
 # --- Configuration ---
-BUBBLE_SIZE = 20          # Final bubble diameter in pixels
+BUBBLE_SIZE = 64          # Final bubble diameter in pixels
 SPLASH_SIZE = 260         # Startup splash bubble size
 CHECK_INTERVAL = 2.0      # Seconds between status checks
 ACTIVE_WINDOW_SECS = 600  # Sessions active within this window (10 min)
@@ -97,6 +97,127 @@ def _save_position(x, y):
             json.dump({"x": x, "y": y}, f)
     except OSError:
         pass
+
+
+# --- Pixel Art Crab ---
+
+GRID_SIZE = 16
+
+# B = body (salmon), D = dark (details), . = empty
+# Visual top-to-bottom order (row 0 = top of image)
+# Derived from:  ▐▛███▜▌
+#               ▝▜█████▛▘
+#                 ▘▘ ▝▝
+CRAB_ART = [
+    "................",  # 0: effects area
+    "................",  # 1: effects area
+    "................",  # 2: effects area
+    "................",  # 3: effects area
+    "..BBBBBBBBBBBB..",  # 4: body top
+    "..BBDBBBBBBDBB..",  # 5: eyes (top)
+    "..BBDBBBBBBDBB..",  # 6: eyes (bottom)
+    "..BBBBBBBBBBBB..",  # 7: body
+    "BBBBBBBBBBBBBBBB",  # 8: wide body
+    "..BBBBBBBBBBBB..",  # 9: body
+    "..BBBBBBBBBBBB..",  # 10: body bottom
+    "...B.B....B.B...",  # 11: legs (body color)
+    "................",  # 12: empty
+    "................",  # 13: empty
+    "................",  # 14: empty
+    "................",  # 15: empty
+]
+
+_CRAB_COLORS = {
+    'B': (0.90, 0.44, 0.31, 1.0),  # #E6704F body
+    'D': (0.20, 0.15, 0.15, 1.0),  # dark details
+}
+
+
+def _draw_crab_art(bounds):
+    """Draw the crab pixel art within the given bounds."""
+    w, h = bounds.size.width, bounds.size.height
+    px_w = w / GRID_SIZE
+    px_h = h / GRID_SIZE
+    for vis_row, row_str in enumerate(CRAB_ART):
+        y = (GRID_SIZE - 1 - vis_row) * px_h
+        for col, ch in enumerate(row_str):
+            if ch in _CRAB_COLORS:
+                r, g, b, a = _CRAB_COLORS[ch]
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
+                NSBezierPath.fillRect_(NSMakeRect(
+                    col * px_w, y, px_w + 0.5, px_h + 0.5))
+
+
+def _draw_status_badge(bounds, status):
+    """Draw status badge in top-right: green checkmark, yellow dot, or red dot."""
+    w, h = bounds.size.width, bounds.size.height
+    px = w / GRID_SIZE
+    badge_d = 4.5 * px
+    badge_x = w - badge_d - 0.5 * px
+    badge_y = h - badge_d - 2 * px
+    badge_rect = NSMakeRect(badge_x, badge_y, badge_d, badge_d)
+
+    if status == "ok":
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.30, 0.74, 0.36, 1.0).set()
+        NSBezierPath.bezierPathWithOvalInRect_(badge_rect).fill()
+        NSColor.whiteColor().set()
+        cx = badge_x + badge_d / 2
+        cy = badge_y + badge_d / 2
+        r = badge_d * 0.28
+        path = NSBezierPath.bezierPath()
+        path.moveToPoint_((cx - r * 0.8, cy + r * 0.1))
+        path.lineToPoint_((cx - r * 0.15, cy - r * 0.55))
+        path.lineToPoint_((cx + r * 0.9, cy + r * 0.6))
+        path.setLineWidth_(max(1.5, px * 0.55))
+        path.setLineCapStyle_(1)
+        path.stroke()
+    elif status == "warn":
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.70, 0.10, 1.0).set()
+        NSBezierPath.bezierPathWithOvalInRect_(badge_rect).fill()
+    elif status == "retry":
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.30, 0.25, 1.0).set()
+        NSBezierPath.bezierPathWithOvalInRect_(badge_rect).fill()
+
+
+def _draw_particles(bounds, phase):
+    """Draw particles that float upward from the crab and drift away."""
+    w, h = bounds.size.width, bounds.size.height
+    px = w / GRID_SIZE
+
+    num_particles = 7
+    for i in range(num_particles):
+        # Each particle cycles independently
+        period = 2.2 + i * 0.35
+        local_t = (phase * 0.05 + i * 0.71) % period
+        life = local_t / period  # 0..1
+
+        if life > 0.92:
+            continue  # brief gap before respawn
+
+        # Spawn near top of crab (visual row ~4, cols 4-12)
+        spawn_x = 4.0 + (i * 1.73) % 8.0
+        spawn_y = 4.2
+
+        # Float upward + horizontal drift
+        drift_x = math.sin(i * 2.1 + phase * 0.03) * 2.0
+        x = spawn_x + drift_x * life
+        y = spawn_y - life * 5.5  # float upward (lower row = higher)
+
+        # Size & alpha fade with age
+        base_size = 0.6 + (i % 3) * 0.3
+        size = base_size * (1.0 - life * 0.4)
+        alpha = 0.85 * (1.0 - life * 0.7)
+
+        # Purple shades
+        r = 0.35 + (i % 3) * 0.05
+        g = 0.22 + (i % 2) * 0.06
+        b = 0.50 + (i % 4) * 0.03
+
+        screen_y = (GRID_SIZE - 1 - y) * (h / GRID_SIZE)
+        screen_x = x * px
+        s = px * size
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, alpha).set()
+        NSBezierPath.fillRect_(NSMakeRect(screen_x, screen_y, s, s))
 
 
 # --- Session detection & status checking ---
@@ -227,30 +348,44 @@ def check_all_sessions():
 # --- UI Components ---
 
 class BubbleView(NSView):
-    """The draggable bubble circle. Single-click opens detail panel."""
+    """The draggable bubble with crab pixel art. Single-click opens detail panel."""
     _delegate_ref = None
 
     def initWithFrame_(self, frame):
         self = objc.super(BubbleView, self).initWithFrame_(frame)
         if self:
-            self._color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                0.2, 0.8, 0.3, 0.9)
+            self._status = "ok"
+            self._anim_phase = 0.0
+            self._anim_timer = None
             self._drag_start = None
             self._mouse_down_screen = None
             self._did_drag = False
         return self
 
-    def setColor_(self, color):
-        self._color = color
+    def setStatus_(self, status):
+        if status == self._status:
+            return
+        self._status = status
+        if status in ("retry", "warn"):
+            if not self._anim_timer:
+                self._anim_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    0.033, self, "animTick:", None, True)
+        else:
+            if self._anim_timer:
+                self._anim_timer.invalidate()
+                self._anim_timer = None
+        self.setNeedsDisplay_(True)
+
+    @objc.typedSelector(b"v@:@")
+    def animTick_(self, timer):
+        self._anim_phase += 0.1
         self.setNeedsDisplay_(True)
 
     def drawRect_(self, rect):
-        path = NSBezierPath.bezierPathWithOvalInRect_(self.bounds())
-        self._color.set()
-        path.fill()
-        NSColor.colorWithCalibratedWhite_alpha_(0.3, 0.5).set()
-        path.setLineWidth_(1.0)
-        path.stroke()
+        _draw_crab_art(self.bounds())
+        _draw_status_badge(self.bounds(), self._status)
+        if self._status in ("warn", "retry"):
+            _draw_particles(self.bounds(), self._anim_phase)
 
     def mouseDown_(self, event):
         self._drag_start = event.locationInWindow()
@@ -417,28 +552,6 @@ def _build_detail_attributed_string(sessions):
         seg = NSAttributedString.alloc().initWithString_attributes_(text, attrs)
         result.appendAttributedString_(seg)
 
-    # --- Color Rules Section ---
-    _append("COLOR RULES\n", section_font, _c("subtitle"))
-    _append("\n", mono_sm, _c("separator"))
-
-    # Green rule
-    _append("  \u25CF ", label_font, _c("ok_dot"))
-    _append("Green", label_bold, _c("ok_dot"))
-    _append("  \u2014  All sessions running normally\n", rule_font, _c("rule_text"))
-
-    # Yellow rule
-    _append("  \u25CF ", label_font, _c("warn_dot"))
-    _append("Yellow", label_bold, _c("warn_dot"))
-    _append("  \u2014  Some sessions retrying (partial errors)\n", rule_font, _c("rule_text"))
-
-    # Red rule
-    _append("  \u25CF ", label_font, _c("err_dot"))
-    _append("Red", label_bold, _c("err_dot"))
-    _append("  \u2014  All sessions retrying (network down)\n", rule_font, _c("rule_text"))
-
-    _append("\n", mono_sm, _c("separator"))
-    _append("\u2500" * 46 + "\n\n", mono_sm, _c("separator"))
-
     # --- Sessions Section ---
     _append("SESSIONS\n", section_font, _c("subtitle"))
     _append("\n", mono_sm, _c("separator"))
@@ -483,6 +596,82 @@ def _build_detail_attributed_string(sessions):
     return result
 
 
+CRAB_PREVIEW_SIZE = 80
+
+class CrabPreviewView(NSView):
+    """Clickable crab preview that cycles through status states on click."""
+    _status = "ok"
+    _anim_phase = 0.0
+    _anim_timer = None
+    _status_index = 0
+    _statuses = ["ok", "warn", "retry"]
+
+    def initWithFrame_(self, frame):
+        self = objc.super(CrabPreviewView, self).initWithFrame_(frame)
+        if self:
+            self._status = "ok"
+            self._anim_phase = 0.0
+            self._anim_timer = None
+            self._status_index = 0
+        return self
+
+    def drawRect_(self, rect):
+        _draw_crab_art(self.bounds())
+        _draw_status_badge(self.bounds(), self._status)
+        if self._status in ("warn", "retry"):
+            _draw_particles(self.bounds(), self._anim_phase)
+
+    def mouseDown_(self, event):
+        self._status_index = (self._status_index + 1) % 3
+        self._status = self._statuses[self._status_index]
+        if self._status in ("warn", "retry"):
+            if not self._anim_timer:
+                self._anim_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    0.033, self, "animTick:", None, True)
+        else:
+            if self._anim_timer:
+                self._anim_timer.invalidate()
+                self._anim_timer = None
+        self.setNeedsDisplay_(True)
+
+    @objc.typedSelector(b"v@:@")
+    def animTick_(self, timer):
+        self._anim_phase += 0.1
+        self.setNeedsDisplay_(True)
+
+    def stopAnimation(self):
+        if self._anim_timer:
+            self._anim_timer.invalidate()
+            self._anim_timer = None
+
+    def acceptsFirstMouse_(self, event):
+        return True
+
+    def resetCursorRects(self):
+        self.addCursorRect_cursor_(self.bounds(), NSCursor.pointingHandCursor())
+
+
+MINI_CRAB_SIZE = 36
+
+class MiniCrabStatusView(NSView):
+    """Small animated crab illustration showing a specific status."""
+    _status = "ok"
+    _anim_phase = 0.0
+
+    def initWithFrame_(self, frame):
+        self = objc.super(MiniCrabStatusView, self).initWithFrame_(frame)
+        if self:
+            self._status = "ok"
+            self._anim_phase = 0.0
+        return self
+
+    def drawRect_(self, rect):
+        _draw_crab_art(self.bounds())
+        _draw_status_badge(self.bounds(), self._status)
+        if self._status in ("warn", "retry"):
+            _draw_particles(self.bounds(), self._anim_phase)
+
+
 class DetailPanelController(NSObject):
     """Manages the custom detail panel window."""
 
@@ -492,6 +681,9 @@ class DetailPanelController(NSObject):
             self._window = None
             self._fade_step = 0
             self._monitor = None
+            self._crab_preview = None
+            self._mini_crabs = []
+            self._mini_timer = None
         return self
 
     def showSessions_anchorFrame_(self, sessions, anchor_frame):
@@ -569,9 +761,80 @@ class DetailPanelController(NSObject):
             NSColor.colorWithCalibratedWhite_alpha_(0.25, 0.3).CGColor())
         root.addSubview_(divider)
 
-        # Scroll area
+        # --- Status Rules with mini crab illustrations ---
+        rules_label_font = (NSFont.fontWithName_size_("SF Pro Text", 11.5)
+                            or NSFont.systemFontOfSize_(11.5))
+        rules_bold = NSFont.boldSystemFontOfSize_(12)
+        section_font = NSFont.boldSystemFontOfSize_(11)
+
+        # Section header
+        hdr = NSTextField.labelWithString_("STATUS RULES")
+        hdr.setFont_(section_font)
+        hdr.setTextColor_(_c("subtitle"))
+        hdr.setBackgroundColor_(NSColor.clearColor())
+        hdr.setBezeled_(False)
+        hdr.setEditable_(False)
+        hdr.setFrame_(NSMakeRect(24, divider_y - 22, 200, 16))
+        root.addSubview_(hdr)
+
+        rules_data = [
+            ("ok",    "OK",    "All sessions running normally",          _c("ok_dot")),
+            ("warn",  "Warn",  "Some sessions retrying (partial errors)", _c("warn_dot")),
+            ("retry", "Error", "All sessions retrying (network down)",   _c("err_dot")),
+        ]
+        row_h = 42
+        rules_top_y = divider_y - 30
+        self._mini_crabs = []
+
+        for i, (status, label, desc, color) in enumerate(rules_data):
+            row_y = rules_top_y - (i + 1) * row_h + 6
+
+            # Mini crab illustration
+            crab = MiniCrabStatusView.alloc().initWithFrame_(
+                NSMakeRect(20, row_y, MINI_CRAB_SIZE, MINI_CRAB_SIZE))
+            crab._status = status
+            root.addSubview_(crab)
+            self._mini_crabs.append(crab)
+
+            # Status label + description
+            lbl_x = 20 + MINI_CRAB_SIZE + 8
+            lbl = NSTextField.labelWithString_(label)
+            lbl.setFont_(rules_bold)
+            lbl.setTextColor_(color)
+            lbl.setBackgroundColor_(NSColor.clearColor())
+            lbl.setBezeled_(False)
+            lbl.setEditable_(False)
+            lbl.setFrame_(NSMakeRect(lbl_x, row_y + 18, 50, 16))
+            root.addSubview_(lbl)
+
+            desc_lbl = NSTextField.labelWithString_(f"\u2014  {desc}")
+            desc_lbl.setFont_(rules_label_font)
+            desc_lbl.setTextColor_(_c("rule_text"))
+            desc_lbl.setBackgroundColor_(NSColor.clearColor())
+            desc_lbl.setBezeled_(False)
+            desc_lbl.setEditable_(False)
+            desc_lbl.setFrame_(NSMakeRect(lbl_x + 52, row_y + 18, 250, 16))
+            root.addSubview_(desc_lbl)
+
+        # Crab preview (top-right, clickable to cycle states)
+        crab_x = PANEL_WIDTH - CRAB_PREVIEW_SIZE - 20
+        crab_y = divider_y - CRAB_PREVIEW_SIZE - 24
+        self._crab_preview = CrabPreviewView.alloc().initWithFrame_(
+            NSMakeRect(crab_x, crab_y, CRAB_PREVIEW_SIZE, CRAB_PREVIEW_SIZE))
+        root.addSubview_(self._crab_preview)
+
+        # Divider 2 (below rules)
+        divider2_y = rules_top_y - 3 * row_h - 4
+        divider2 = NSView.alloc().initWithFrame_(
+            NSMakeRect(16, divider2_y, PANEL_WIDTH - 32, 1))
+        divider2.setWantsLayer_(True)
+        divider2.layer().setBackgroundColor_(
+            NSColor.colorWithCalibratedWhite_alpha_(0.25, 0.3).CGColor())
+        root.addSubview_(divider2)
+
+        # Scroll area (sessions only, below rules)
         scroll_y = 12
-        scroll_h = divider_y - scroll_y - 6
+        scroll_h = divider2_y - scroll_y - 6
         scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(12, scroll_y, PANEL_WIDTH - 24, scroll_h))
         scroll.setHasVerticalScroller_(True)
@@ -593,6 +856,10 @@ class DetailPanelController(NSObject):
 
         scroll.setDocumentView_(text_view)
         root.addSubview_(scroll)
+
+        # Start animation timer for mini crabs
+        self._mini_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.033, self, "miniCrabTick:", None, True)
 
         win.setContentView_(root)
         win.makeKeyAndOrderFront_(None)
@@ -616,7 +883,20 @@ class DetailPanelController(NSObject):
         if self._window:
             self._window.setAlphaValue_(alpha)
 
+    @objc.typedSelector(b"v@:@")
+    def miniCrabTick_(self, timer):
+        for crab in self._mini_crabs:
+            crab._anim_phase += 0.1
+            crab.setNeedsDisplay_(True)
+
     def closePanel(self):
+        if self._mini_timer:
+            self._mini_timer.invalidate()
+            self._mini_timer = None
+        self._mini_crabs = []
+        if self._crab_preview:
+            self._crab_preview.stopAnimation()
+            self._crab_preview = None
         if self._window:
             self._window.orderOut_(None)
             self._window = None
@@ -646,36 +926,40 @@ class DetailPanelController(NSObject):
 # --- Splash Screen (Startup Animation) ---
 
 class SplashBubbleView(NSView):
-    """The big animated bubble shown on startup."""
+    """The big animated bubble shown on startup with status cycling."""
     _pulse_phase = 0.0
+    _status = "ok"
+    _anim_phase = 0.0
 
     def initWithFrame_(self, frame):
         self = objc.super(SplashBubbleView, self).initWithFrame_(frame)
         if self:
             self._pulse_phase = 0.0
+            self._status = "ok"
+            self._anim_phase = 0.0
         return self
 
     def drawRect_(self, rect):
         b = self.bounds()
-        # Pulsing glow
-        glow_alpha = 0.08 + 0.06 * math.sin(self._pulse_phase)
-        glow_inset = -12
+        # Pulsing glow behind crab
+        glow_alpha = 0.06 + 0.04 * math.sin(self._pulse_phase)
+        glow_inset = -8
         glow_rect = NSMakeRect(
             b.origin.x + glow_inset, b.origin.y + glow_inset,
             b.size.width - 2 * glow_inset, b.size.height - 2 * glow_inset)
-        glow_path = NSBezierPath.bezierPathWithOvalInRect_(glow_rect)
+        glow_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            glow_rect, 12, 12)
         NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            0.3, 0.85, 0.4, glow_alpha).set()
+            0.90, 0.44, 0.31, glow_alpha).set()
         glow_path.fill()
 
-        # Main circle
-        path = NSBezierPath.bezierPathWithOvalInRect_(b)
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            0.20, 0.80, 0.35, 0.92).set()
-        path.fill()
-        NSColor.colorWithCalibratedWhite_alpha_(0.5, 0.25).set()
-        path.setLineWidth_(1.5)
-        path.stroke()
+        # Draw crab pixel art
+        _draw_crab_art(b)
+
+        # Draw status effect
+        _draw_status_badge(b, self._status)
+        if self._status in ("warn", "retry"):
+            _draw_particles(b, self._anim_phase)
 
 
 class SplashController(NSObject):
@@ -738,9 +1022,9 @@ class SplashController(NSObject):
 
         # --- Rule lines (below the bubble) ---
         rules = [
-            ("\u25CF", (0.30, 0.82, 0.40), "Green", "All OK"),
-            ("\u25CF", (0.95, 0.70, 0.10), "Yellow", "Some retrying"),
-            ("\u25CF", (0.95, 0.30, 0.25), "Red", "All retrying"),
+            ("\u2713", (0.30, 0.74, 0.36), "OK", "All sessions normal"),
+            ("\u25C6", (0.40, 0.28, 0.55), "Warn", "Some sessions retrying"),
+            ("\u25C6", (0.95, 0.30, 0.25), "Error", "All sessions retrying"),
         ]
         rule_y_start = cy - SPLASH_SIZE / 2 - 50
         for i, (dot, dot_rgb, label, desc) in enumerate(rules):
@@ -824,9 +1108,18 @@ class SplashController(NSObject):
                 self._anim_step = 0
 
         elif self._phase == "hold":
-            # Hold for SPLASH_HOLD_SECS, keep pulsing
+            # Hold for SPLASH_HOLD_SECS, cycle through 3 status states
             hold_frames = int(SPLASH_HOLD_SECS / SPLASH_ANIM_INTERVAL)
+            segment = hold_frames // 3
             if self._bubble_view:
+                # Cycle: ok -> warn -> retry
+                if self._anim_step < segment:
+                    self._bubble_view._status = "ok"
+                elif self._anim_step < segment * 2:
+                    self._bubble_view._status = "warn"
+                else:
+                    self._bubble_view._status = "retry"
+                self._bubble_view._anim_phase = self._pulse_step * 0.15
                 self._bubble_view._pulse_phase = self._pulse_step * 0.15
                 self._bubble_view.setNeedsDisplay_(True)
             if self._anim_step >= hold_frames:
@@ -951,18 +1244,8 @@ class BubbleDelegate(NSObject):
         status, info, sessions = check_all_sessions()
         self._active_sessions = sessions
 
-        if status == "retry":
-            color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                0.9, 0.2, 0.2, 0.9)
-        elif status == "warn":
-            color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                0.95, 0.7, 0.1, 0.9)
-        else:
-            color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                0.2, 0.8, 0.3, 0.9)
-
         if self._view:
-            self._view.setColor_(color)
+            self._view.setStatus_(status)
             self._view.setToolTip_(info)
 
     def showDetailPanel(self):
