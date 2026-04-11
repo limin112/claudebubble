@@ -14,7 +14,7 @@ macOS 桌面悬浮气泡，实时监控 Claude Code 会话的网络状态。
 | 正常 | 警告 | 错误 |
 |:-:|:-:|:-:|
 | ![OK](screenshot-ok.png) | ![Warn](screenshot-warn.png) | ![Error](screenshot-error.png) |
-| 绿色勾勾 | 黄色圆点 + 漂浮粒子 | 红色圆点 + 漂浮粒子 |
+| 绿色勾勾 | 黄色圆点 + 皮鞭（慢） + 粒子 | 红色圆点 + 皮鞭（快） + 粒子 |
 
 - **OK** - 所有会话正常运行
 - **Warn** - 部分会话出现网络错误，正在重试
@@ -154,7 +154,7 @@ A pixel-art crab mascot floats on your desktop and shows network status with vis
 | OK | Warn | Error |
 |:-:|:-:|:-:|
 | ![OK](screenshot-ok.png) | ![Warn](screenshot-warn.png) | ![Error](screenshot-error.png) |
-| Green checkmark | Yellow dot + floating particles | Red dot + floating particles |
+| Green checkmark | Yellow dot + whip (slow) + particles | Red dot + whip (fast) + particles |
 
 - **OK** - All sessions healthy
 - **Warn** - Some sessions experiencing network errors

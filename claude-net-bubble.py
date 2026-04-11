@@ -132,6 +132,48 @@ _CRAB_COLORS = {
     'D': (0.20, 0.15, 0.15, 1.0),  # dark details
 }
 
+# --- Whip animation ---
+# 8 frames of a thick black whip. Coordinates are floats on the 16x16 grid.
+# Values beyond 0-15 extend past the bubble edge (clipped but looks dramatic).
+WHIP_FRAMES = [
+    # Frame 0: REST (raised high, tip above bubble)
+    [(15, 8), (16, 6), (16, 3), (15, 0), (14, -3)],
+    # Frame 1: ANTICIPATION (pulled further back/right)
+    [(15, 8), (16, 6), (17, 3), (17, 0), (16, -3)],
+    # Frame 2: FORWARD SWING (sweeping left over crab head)
+    [(15, 8), (14, 6), (11, 3), (8, 1), (4, -1)],
+    # Frame 3: CRACK (whip slashing down-left, extends past bubble)
+    [(15, 8), (13, 8), (10, 9), (6, 11), (2, 14), (-1, 18)],
+    # Frame 4: CRACK + FLASH (same shape, spark at tip)
+    [(15, 8), (13, 8), (10, 9), (6, 11), (2, 14), (-1, 18)],
+    # Frame 5: RECOIL (whip loosens, bouncing back)
+    [(15, 8), (13, 7), (10, 6), (7, 6), (4, 8)],
+    # Frame 6: RETURNING (curling back up)
+    [(15, 8), (15, 6), (14, 3), (14, 0), (14, -2)],
+    # Frame 7: ALMOST REST (back to raised)
+    [(15, 8), (16, 6), (16, 3), (15, 0), (14, -3)],
+]
+
+# Duration each frame is shown (in phase units; phase += 0.1 per tick at 30fps)
+WHIP_FRAME_DURATIONS = [
+    3.0,   # Frame 0: REST - long hold (~1s)
+    1.5,   # Frame 1: ANTICIPATION (~0.5s)
+    0.6,   # Frame 2: FORWARD SWING - fast
+    0.3,   # Frame 3: CRACK - very fast
+    0.3,   # Frame 4: CRACK+FLASH - very fast
+    0.6,   # Frame 5: RECOIL
+    0.9,   # Frame 6: RETURNING
+    0.9,   # Frame 7: ALMOST REST
+]
+_WHIP_TOTAL = sum(WHIP_FRAME_DURATIONS)
+
+# warn = normal speed (~2.7s/cycle), retry = double speed (~1.35s/cycle)
+WHIP_SPEED = {"warn": 1.0, "retry": 0.5}
+
+_WHIP_COLOR = (0.08, 0.06, 0.06, 1.0)   # near-black leather whip
+_WHIP_FLASH_COLOR = (1.0, 0.95, 0.50, 1.0)  # bright yellow spark
+_WHIP_LINE_WIDTH = 2.5  # grid-units, thick solid line
+
 
 def _draw_crab_art(bounds):
     """Draw the crab pixel art within the given bounds."""
@@ -218,6 +260,73 @@ def _draw_particles(bounds, phase):
         s = px * size
         NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, alpha).set()
         NSBezierPath.fillRect_(NSMakeRect(screen_x, screen_y, s, s))
+
+
+def _get_whip_frame(phase, status):
+    """Return (frame_index, is_flash) based on animation phase and status."""
+    speed = WHIP_SPEED.get(status, 1.0)
+    total = _WHIP_TOTAL * speed
+    t = phase % total
+    accumulated = 0.0
+    for i, dur in enumerate(WHIP_FRAME_DURATIONS):
+        accumulated += dur * speed
+        if t < accumulated:
+            return i, (i == 4)
+    return 0, False
+
+
+def _draw_whip(bounds, phase, status):
+    """Draw thick black whip as a continuous solid line. Extends beyond bubble."""
+    w, h = bounds.size.width, bounds.size.height
+    px = w / GRID_SIZE  # one grid unit in screen pixels
+
+    frame_idx, is_flash = _get_whip_frame(phase, status)
+    segments = WHIP_FRAMES[frame_idx]
+    if len(segments) < 2:
+        return
+
+    # Convert grid coords to screen coords (float)
+    def to_screen(col, vis_row):
+        return (col * px + px * 0.5, (GRID_SIZE - 1 - vis_row) * px + px * 0.5)
+
+    # Draw thick solid line through all segment points
+    path = NSBezierPath.bezierPath()
+    sx, sy = to_screen(*segments[0])
+    path.moveToPoint_((sx, sy))
+    for col, vis_row in segments[1:]:
+        sx, sy = to_screen(col, vis_row)
+        path.lineToPoint_((sx, sy))
+
+    path.setLineWidth_(px * _WHIP_LINE_WIDTH)
+    path.setLineCapStyle_(1)   # round caps
+    path.setLineJoinStyle_(1)  # round joins
+    r, g, b, a = _WHIP_COLOR
+    NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
+    path.stroke()
+
+    # Big flash/spark at whip tip on crack frame
+    if is_flash:
+        # Find the last point that's actually inside the view for the flash
+        tip_col, tip_row = segments[-1]
+        tip_x, tip_y = to_screen(tip_col, tip_row)
+        # Clamp to view bounds for the flash visual
+        tip_x = max(0, min(w, tip_x))
+        tip_y = max(0, min(h, tip_y))
+
+        # Large bright flash
+        flash_r = px * 3
+        r, g, b, a = _WHIP_FLASH_COLOR
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
+        NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+            tip_x - flash_r, tip_y - flash_r,
+            flash_r * 2, flash_r * 2)).fill()
+
+        # Outer glow
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 0.8, 0.4).set()
+        glow_r = px * 5
+        NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+            tip_x - glow_r, tip_y - glow_r,
+            glow_r * 2, glow_r * 2)).fill()
 
 
 # --- Session detection & status checking ---
@@ -385,6 +494,7 @@ class BubbleView(NSView):
         _draw_crab_art(self.bounds())
         _draw_status_badge(self.bounds(), self._status)
         if self._status in ("warn", "retry"):
+            _draw_whip(self.bounds(), self._anim_phase, self._status)
             _draw_particles(self.bounds(), self._anim_phase)
 
     def mouseDown_(self, event):
@@ -448,23 +558,23 @@ PANEL_HEIGHT = 520
 PANEL_CORNER_RADIUS = 14
 
 _COLORS = {
-    "bg":         (0.10, 0.10, 0.12, 0.94),
-    "title":      (0.92, 0.92, 0.95, 1.0),
-    "subtitle":   (0.55, 0.55, 0.60, 1.0),
-    "separator":  (0.25, 0.25, 0.30, 0.6),
-    "ok_dot":     (0.30, 0.82, 0.40, 1.0),
-    "warn_dot":   (0.95, 0.70, 0.10, 1.0),
-    "err_dot":    (0.95, 0.30, 0.25, 1.0),
-    "ok_text":    (0.55, 0.78, 0.55, 1.0),
-    "err_text":   (0.95, 0.50, 0.45, 1.0),
-    "log_text":   (0.72, 0.72, 0.76, 1.0),
-    "session":    (0.85, 0.85, 0.90, 1.0),
-    "close_bg":   (0.20, 0.20, 0.24, 1.0),
-    "close_hover": (0.30, 0.30, 0.35, 1.0),
-    "close_text": (0.60, 0.60, 0.65, 1.0),
-    "rule_text":  (0.68, 0.68, 0.72, 1.0),
-    "rule_label": (0.80, 0.80, 0.84, 1.0),
-    "empty":      (0.45, 0.45, 0.50, 0.7),
+    "bg":         (0.98, 0.98, 0.98, 0.96),
+    "title":      (0.10, 0.10, 0.12, 1.0),
+    "subtitle":   (0.45, 0.45, 0.50, 1.0),
+    "separator":  (0.82, 0.82, 0.84, 0.8),
+    "ok_dot":     (0.22, 0.72, 0.32, 1.0),
+    "warn_dot":   (0.90, 0.65, 0.05, 1.0),
+    "err_dot":    (0.90, 0.25, 0.20, 1.0),
+    "ok_text":    (0.20, 0.60, 0.20, 1.0),
+    "err_text":   (0.85, 0.30, 0.25, 1.0),
+    "log_text":   (0.30, 0.30, 0.35, 1.0),
+    "session":    (0.12, 0.12, 0.15, 1.0),
+    "close_bg":   (0.90, 0.90, 0.92, 1.0),
+    "close_hover": (0.82, 0.82, 0.85, 1.0),
+    "close_text": (0.40, 0.40, 0.45, 1.0),
+    "rule_text":  (0.35, 0.35, 0.40, 1.0),
+    "rule_label": (0.15, 0.15, 0.20, 1.0),
+    "empty":      (0.55, 0.55, 0.60, 0.7),
 }
 
 def _c(name):
@@ -619,6 +729,7 @@ class CrabPreviewView(NSView):
         _draw_crab_art(self.bounds())
         _draw_status_badge(self.bounds(), self._status)
         if self._status in ("warn", "retry"):
+            _draw_whip(self.bounds(), self._anim_phase, self._status)
             _draw_particles(self.bounds(), self._anim_phase)
 
     def mouseDown_(self, event):
@@ -669,6 +780,7 @@ class MiniCrabStatusView(NSView):
         _draw_crab_art(self.bounds())
         _draw_status_badge(self.bounds(), self._status)
         if self._status in ("warn", "retry"):
+            _draw_whip(self.bounds(), self._anim_phase, self._status)
             _draw_particles(self.bounds(), self._anim_phase)
 
 
@@ -758,7 +870,7 @@ class DetailPanelController(NSObject):
             NSMakeRect(16, divider_y, PANEL_WIDTH - 32, 1))
         divider.setWantsLayer_(True)
         divider.layer().setBackgroundColor_(
-            NSColor.colorWithCalibratedWhite_alpha_(0.25, 0.3).CGColor())
+            NSColor.colorWithCalibratedWhite_alpha_(0.82, 0.8).CGColor())
         root.addSubview_(divider)
 
         # --- Status Rules with mini crab illustrations ---
@@ -829,7 +941,7 @@ class DetailPanelController(NSObject):
             NSMakeRect(16, divider2_y, PANEL_WIDTH - 32, 1))
         divider2.setWantsLayer_(True)
         divider2.layer().setBackgroundColor_(
-            NSColor.colorWithCalibratedWhite_alpha_(0.25, 0.3).CGColor())
+            NSColor.colorWithCalibratedWhite_alpha_(0.82, 0.8).CGColor())
         root.addSubview_(divider2)
 
         # Scroll area (sessions only, below rules)
@@ -959,6 +1071,7 @@ class SplashBubbleView(NSView):
         # Draw status effect
         _draw_status_badge(b, self._status)
         if self._status in ("warn", "retry"):
+            _draw_whip(b, self._anim_phase, self._status)
             _draw_particles(b, self._anim_phase)
 
 
@@ -1072,7 +1185,7 @@ class SplashController(NSObject):
         self._window.setLevel_(NSFloatingWindowLevel + 3)
         self._window.setOpaque_(False)
         self._window.setBackgroundColor_(NSColor.clearColor())
-        self._window.setHasShadow_(True)
+        self._window.setHasShadow_(False)
         self._window.setIgnoresMouseEvents_(True)
         self._window.setAlphaValue_(0.0)
 
@@ -1222,7 +1335,7 @@ class BubbleDelegate(NSObject):
         self._window.setLevel_(NSFloatingWindowLevel)
         self._window.setOpaque_(False)
         self._window.setBackgroundColor_(NSColor.clearColor())
-        self._window.setHasShadow_(True)
+        self._window.setHasShadow_(False)
         self._window.setIgnoresMouseEvents_(False)
         self._window.setCollectionBehavior_(1 << 0)  # canJoinAllSpaces
         self._window.setAlphaValue_(1.0)
